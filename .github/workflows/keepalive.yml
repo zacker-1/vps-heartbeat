@@ -2,8 +2,7 @@ name: Keep Scheduled Workflows Alive
 
 on:
   schedule:
-    - cron: "17 4 1 * * *"
-
+    - cron: "17 4 1 * *"
   workflow_dispatch:
 
 permissions:
@@ -14,17 +13,25 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Update activity marker
+      - name: Update heartbeat marker
         shell: bash
         run: |
+          set -euo pipefail
+
           date -u '+%Y-%m-%d %H:%M:%S UTC' > .heartbeat-keepalive
 
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
           git add .heartbeat-keepalive
-          git commit -m "chore: heartbeat keepalive" || exit 0
+
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+
+          git commit -m "chore: update heartbeat marker"
           git push
