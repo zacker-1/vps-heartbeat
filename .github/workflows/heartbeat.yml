@@ -1,0 +1,189 @@
+name: VPS Heartbeat
+
+on:
+  schedule:
+    # 每5分钟左右一次，故意避开整点
+    - cron: "2-59/5 * * * *"
+
+  # 允许我们手动点按钮测试
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: vps-heartbeat
+  cancel-in-progress: false
+
+jobs:
+  heartbeat:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+
+    env:
+      MONITOR_URL: ${{ secrets.MONITOR_URL }}
+      TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+      TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+      GH_TOKEN: ${{ github.token }}
+      REPO: ${{ github.repository }}
+
+    steps:
+      - name: Check VPS and notify on state change
+        shell: bash
+        run: |
+          set -u
+
+          STATE_LABEL="heartbeat-state"
+
+          send_telegram() {
+            local text="$1"
+
+            curl \
+              --silent \
+              --show-error \
+              --fail \
+              --retry 2 \
+              --connect-timeout 10 \
+              --max-time 20 \
+              -X POST \
+              "https://api.telegram.org/bot${TG_BOT_TOKEN}/sendMessage" \
+              --data-urlencode "chat_id=${TG_CHAT_ID}" \
+              --data-urlencode "text=${text}" \
+              >/dev/null
+          }
+
+          check_once() {
+            local tmp
+            local code
+
+            tmp="$(mktemp)"
+
+            code="$(
+              curl \
+                --silent \
+                --show-error \
+                --location \
+                --connect-timeout 8 \
+                --max-time 15 \
+                --output "${tmp}" \
+                --write-out "%{http_code}" \
+                "${MONITOR_URL}" \
+                2>/dev/null \
+              || true
+            )"
+
+            # 同时检查：
+            # 1. HTTP必须200
+            # 2. 返回内容确实像我们的Clash YAML
+            if [[ "${code}" == "200" ]] && \
+               grep -q '^mixed-port:' "${tmp}"; then
+              rm -f "${tmp}"
+              return 0
+            fi
+
+            rm -f "${tmp}"
+            return 1
+          }
+
+          # 创建专用状态标签。
+          # 普通公共仓库访客无法靠创建同名Issue冒充状态。
+          gh label create "${STATE_LABEL}" \
+            --repo "${REPO}" \
+            --color "B60205" \
+            --description "Managed automatically by VPS heartbeat" \
+            --force \
+            >/dev/null
+
+          # 一次GitHub任务内部连续检查3次。
+          # 防止一次网络抖动就发宕机报警。
+          OK=0
+
+          for attempt in 1 2 3; do
+            echo "Heartbeat attempt ${attempt}/3"
+
+            if check_once; then
+              OK=1
+              break
+            fi
+
+            if [[ "${attempt}" -lt 3 ]]; then
+              sleep 10
+            fi
+          done
+
+          # 查找是否已经存在“DOWN状态”的Issue。
+          DOWN_ISSUE="$(
+            gh issue list \
+              --repo "${REPO}" \
+              --state open \
+              --label "${STATE_LABEL}" \
+              --limit 10 \
+              --json number \
+              --jq '.[0].number // empty'
+          )"
+
+          NOW="$(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+
+          if [[ "${OK}" -eq 1 ]]; then
+
+            echo "HTTPS heartbeat OK"
+
+            # 如果之前是DOWN，现在恢复，则仅发送一次恢复通知。
+            if [[ -n "${DOWN_ISSUE}" ]]; then
+
+              send_telegram "🟢 VPS 已恢复
+
+时间：${NOW}
+
+外部 HTTPS 心跳恢复正常。
+VPS / Nginx / TLS / Clash订阅地址目前可访问。"
+
+              gh issue close "${DOWN_ISSUE}" \
+                --repo "${REPO}" \
+                --comment "Recovered at ${NOW}." \
+                >/dev/null
+
+              echo "Recovery notification sent."
+            fi
+
+          else
+
+            echo "::warning::VPS HTTPS heartbeat failed 3 consecutive checks."
+
+            # 第一次发现故障才通知。
+            if [[ -z "${DOWN_ISSUE}" ]]; then
+
+              ISSUE_URL="$(
+                gh issue create \
+                  --repo "${REPO}" \
+                  --title "VPS heartbeat DOWN" \
+                  --label "${STATE_LABEL}" \
+                  --body "External HTTPS heartbeat failed three consecutive checks at ${NOW}."
+              )"
+
+              send_telegram "🔴 VPS 外部心跳异常
+
+时间：${NOW}
+
+GitHub Actions 连续 3 次无法通过 HTTPS 健康检查。
+
+可能原因：
+• VPS 整机离线
+• VPS 网络异常
+• Nginx停止
+• TCP/443不可达
+• TLS证书异常
+• Clash订阅文件不可访问
+
+请检查服务器。"
+
+              echo "First DOWN event recorded: ${ISSUE_URL}"
+
+            else
+
+              echo "VPS is still down. Previous alert already exists; skipping duplicate Telegram alert."
+
+            fi
+
+          fi
