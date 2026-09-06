@@ -19,7 +19,8 @@ jobs:
     timeout-minutes: 3
 
     env:
-      MONITOR_URL: ${{ secrets.MONITOR_URL }}
+      MONITOR_HOST: ${{ secrets.MONITOR_HOST }}
+      MONITOR_PORT: ${{ secrets.MONITOR_PORT }}
       TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GH_TOKEN: ${{ github.token }}
@@ -31,8 +32,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          test -n "$MONITOR_URL" || {
-            echo "::error::MONITOR_URL is empty"
+          test -n "$MONITOR_HOST" && test -n "$MONITOR_PORT" || {
+            echo "::error::MONITOR_HOST or MONITOR_PORT is empty"
             exit 1
           }
 
@@ -71,31 +72,20 @@ jobs:
           }
 
           check_once() {
-            local tmp code
-
-            tmp="$(mktemp)"
-
-            code="$(
-              curl \
-                --silent \
-                --show-error \
-                --location \
-                --connect-timeout 8 \
-                --max-time 15 \
-                --output "$tmp" \
-                --write-out "%{http_code}" \
-                "$MONITOR_URL" \
-                2>/dev/null \
-              || true
-            )"
-
-            if [[ "$code" == "200" ]] && grep -q '^mixed-port:' "$tmp"; then
-              rm -f "$tmp"
-              return 0
-            fi
-
-            rm -f "$tmp"
-            return 1
+            python3 - <<'PY'
+          import os, socket, sys
+          try:
+              host = os.environ['MONITOR_HOST']
+              port = int(os.environ['MONITOR_PORT'])
+              if not host or not 1 <= port <= 65535:
+                  raise ValueError('invalid target')
+              with socket.create_connection((host, port), timeout=8):
+                  pass
+          except (OSError, ValueError, KeyError):
+              print('Reality TCP probe failed; target withheld')
+              sys.exit(1)
+          print('Reality TCP probe passed; target withheld')
+          PY
           }
 
           gh label create "$STATE_LABEL" \
@@ -134,12 +124,12 @@ jobs:
 
           if [[ "$OK" -eq 1 ]]; then
 
-            echo "HTTPS heartbeat OK"
+            echo "Reality TCP heartbeat OK"
 
             if [[ -n "$DOWN_ISSUE" ]]; then
 
               printf -v MSG \
-                '🟢 VPS 已恢复\n\n时间：%s\n\n外部 HTTPS 心跳恢复正常。VPS / Nginx / TLS / Clash 订阅地址目前可访问。' \
+                '🟢 VPS 外部检查正常\n\n时间：%s\n\n外部 Reality TCP 检查正常；旧 HTTPS 订阅检查已停用。原告警已解除。仅验证端口可达，不代表完整代理会话正常。' \
                 "$NOW"
 
               send_telegram "$MSG"
@@ -154,12 +144,12 @@ jobs:
 
           else
 
-            echo "::warning::VPS HTTPS heartbeat failed 3 consecutive checks."
+            echo "::warning::Reality TCP heartbeat failed 3 consecutive checks."
 
             if [[ -z "$DOWN_ISSUE" ]]; then
 
               printf -v MSG \
-                '🔴 VPS 外部心跳异常\n\n时间：%s\n\nGitHub Actions 连续 3 次无法通过 HTTPS 健康检查。\n\n可能原因：VPS 离线、网络异常、Nginx/443 异常、TLS 证书异常或订阅文件不可访问。' \
+                '🔴 VPS 外部心跳异常\n\n时间：%s\n\nGitHub Actions 连续 3 次无法连接 Reality TCP 端口。\n\n可能原因：VPS 离线、外部网络异常或 Xray 监听不可达。此检查不依赖 Nginx、HTTPS 或订阅文件，也不会自动重启主机。' \
                 "$NOW"
 
               send_telegram "$MSG"
@@ -169,7 +159,7 @@ jobs:
                   --repo "$REPO" \
                   --title "VPS heartbeat DOWN" \
                   --label "$STATE_LABEL" \
-                  --body "External HTTPS heartbeat failed three consecutive checks at ${NOW}."
+                  --body "External Reality TCP heartbeat failed three consecutive checks at ${NOW}."
               )"
 
               echo "First DOWN event recorded: ${ISSUE_URL}"
