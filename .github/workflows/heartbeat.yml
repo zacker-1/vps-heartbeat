@@ -20,7 +20,8 @@ jobs:
 
     env:
       MONITOR_HOST: ${{ secrets.MONITOR_HOST }}
-      MONITOR_PORT: ${{ secrets.MONITOR_PORT }}
+      # sing-box VLESS entry; keep this visible so a retired secret cannot drift.
+      MONITOR_PORT: "443"
       TG_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
       TG_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
       GH_TOKEN: ${{ github.token }}
@@ -82,9 +83,9 @@ jobs:
               with socket.create_connection((host, port), timeout=8):
                   pass
           except (OSError, ValueError, KeyError):
-              print('Reality TCP probe failed; target withheld')
+              print('sing-box VLESS TCP probe failed; target withheld')
               sys.exit(1)
-          print('Reality TCP probe passed; target withheld')
+          print('sing-box VLESS TCP probe passed; target withheld')
           PY
           }
 
@@ -124,12 +125,12 @@ jobs:
 
           if [[ "$OK" -eq 1 ]]; then
 
-            echo "Reality TCP heartbeat OK"
+            echo "sing-box VLESS TCP heartbeat OK"
 
             if [[ -n "$DOWN_ISSUE" ]]; then
 
               printf -v MSG \
-                '🟢 VPS 外部检查正常\n\n时间：%s\n\n外部 Reality TCP 检查正常；旧 HTTPS 订阅检查已停用。原告警已解除。仅验证端口可达，不代表完整代理会话正常。' \
+                '🟢 VPS 外部检查正常\n\n时间：%s\n\nsing-box VLESS TCP/443 公网检查正常。检查已切换到当前 sing-box 入口，不再检查退役的旧 Reality 端口；原告警已解除。仅验证 TCP 端口可达，不代表代理认证、出站或 HY2/UDP 正常。' \
                 "$NOW"
 
               send_telegram "$MSG"
@@ -144,12 +145,12 @@ jobs:
 
           else
 
-            echo "::warning::Reality TCP heartbeat failed 3 consecutive checks."
+            echo "::warning::sing-box VLESS TCP heartbeat failed 3 consecutive checks."
 
             if [[ -z "$DOWN_ISSUE" ]]; then
 
               printf -v MSG \
-                '🔴 VPS 外部心跳异常\n\n时间：%s\n\nGitHub Actions 连续 3 次无法连接 Reality TCP 端口。\n\n可能原因：VPS 离线、外部网络异常或 Xray 监听不可达。此检查不依赖 Nginx、HTTPS 或订阅文件，也不会自动重启主机。' \
+                '🔴 VPS 外部心跳异常\n\n时间：%s\n\nGitHub Actions 本次运行连续 3 次无法连接 sing-box VLESS TCP/443。\n\n可能原因：VPS 离线、外部网络异常、防火墙限制或 sing-box TCP 监听不可达。仅检查 TCP 入口，不验证代理认证或 HY2/UDP，也不会自动重启主机。' \
                 "$NOW"
 
               send_telegram "$MSG"
@@ -159,7 +160,7 @@ jobs:
                   --repo "$REPO" \
                   --title "VPS heartbeat DOWN" \
                   --label "$STATE_LABEL" \
-                  --body "External Reality TCP heartbeat failed three consecutive checks at ${NOW}."
+                  --body "External sing-box VLESS TCP/443 heartbeat failed three consecutive checks at ${NOW}."
               )"
 
               echo "First DOWN event recorded: ${ISSUE_URL}"
